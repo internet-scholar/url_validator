@@ -6,6 +6,7 @@ from internet_scholar import AthenaLogger, AthenaDatabase, compress, read_dict_f
 import argparse
 from pathlib import Path
 import shutil
+from datetime import date, timedelta
 
 
 class URLValidator:
@@ -16,8 +17,9 @@ class URLValidator:
         twitter_stream,
         unnest(entities.urls) as t(url)
     where
+        creation_date = '{yesterday}' and
         url.display_url not like 'twitter.com/%'
-    """
+    """.format(yesterday=(date.today() - timedelta(days=1)).strftime("%Y-%m-%d"))
 
     __COUNT_UNVALIDATED_URLS = """
     select
@@ -26,8 +28,9 @@ class URLValidator:
         twitter_stream,
         unnest(entities.urls) as t(url)
     where
+        creation_date = '{yesterday}' and
         url.display_url not like 'twitter.com/%'
-    """
+    """.format(yesterday=(date.today() - timedelta(days=1)).strftime("%Y-%m-%d"))
 
     __CREATE_TABLE_VALIDATED_URL = """
     CREATE TABLE validated_url
@@ -75,7 +78,6 @@ class URLValidator:
         query = self.__UNVALIDATED_URLS
         query_count = self.__COUNT_UNVALIDATED_URLS
         if athena.table_exists("validated_url"):
-            athena.query_athena_and_wait("MSCK REPAIR TABLE validated_url")
             logging.info("Table validated_url does not exist")
             query = query + " and url.expanded_url not in (select url from validated_url)"
             query_count = query_count + " and url.expanded_url not in (select url from validated_url)"
