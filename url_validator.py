@@ -75,6 +75,7 @@ class URLValidator:
         query = self.__UNVALIDATED_URLS
         query_count = self.__COUNT_UNVALIDATED_URLS
         if athena.table_exists("validated_url"):
+            athena.query_athena_and_wait("MSCK REPAIR TABLE validated_url")
             logging.info("Table validated_url does not exist")
             query = query + " and url.expanded_url not in (select url from validated_url)"
             query_count = query_count + " and url.expanded_url not in (select url from validated_url)"
