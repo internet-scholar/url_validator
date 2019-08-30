@@ -78,7 +78,7 @@ class URLValidator:
         query = self.__UNVALIDATED_URLS
         query_count = self.__COUNT_UNVALIDATED_URLS
         if athena.table_exists("validated_url"):
-            logging.info("Table validated_url does not exist")
+            logging.info("Table validated_url exists")
             query = query + " and url.expanded_url not in (select url from validated_url)"
             query_count = query_count + " and url.expanded_url not in (select url from validated_url)"
         link_count = int(athena.query_athena_and_get_result(query_string=query_count)['link_count'])
