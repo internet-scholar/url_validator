@@ -17,9 +17,9 @@ class URLValidator:
         twitter_stream,
         unnest(entities.urls) as t(url)
     where
-        creation_date = '{yesterday}' and
+        creation_date = '{creation_date}' and
         url.display_url not like 'twitter.com/%'
-    """.format(yesterday=(date.today() - timedelta(days=1)).strftime("%Y-%m-%d"))
+    """
 
     __COUNT_UNVALIDATED_URLS = """
     select
@@ -28,9 +28,9 @@ class URLValidator:
         twitter_stream,
         unnest(entities.urls) as t(url)
     where
-        creation_date = '{yesterday}' and
+        creation_date = '{creation_date}' and
         url.display_url not like 'twitter.com/%'
-    """.format(yesterday=(date.today() - timedelta(days=1)).strftime("%Y-%m-%d"))
+    """
 
     __CREATE_TABLE_VALIDATED_URL = """
     CREATE TABLE validated_url
@@ -71,12 +71,19 @@ class URLValidator:
         self.s3_data = s3_data
         self.s3_admin = s3_admin
 
-    def expand_urls(self):
+    def expand_urls(self, creation_date=None):
         logging.info("begin: expand URLs")
         athena = AthenaDatabase(database=self.athena_data, s3_output=self.s3_admin)
 
-        query = self.__UNVALIDATED_URLS
-        query_count = self.__COUNT_UNVALIDATED_URLS
+        if creation_date is None:
+            # creation_date is yesterday
+            query = self.__UNVALIDATED_URLS.format(
+                creation_date=(date.today() - timedelta(days=1)).strftime("%Y-%m-%d"))
+            query_count = self.__COUNT_UNVALIDATED_URLS.format(
+                creation_date=(date.today() - timedelta(days=1)).strftime("%Y-%m-%d"))
+        else:
+            query = self.__UNVALIDATED_URLS.format(creation_date=creation_date)
+            query_count = self.__COUNT_UNVALIDATED_URLS.format(creation_date=creation_date)
         if athena.table_exists("validated_url"):
             logging.info("Table validated_url exists")
             query = query + " and url.expanded_url not in (select url from validated_url)"
@@ -110,8 +117,12 @@ class URLValidator:
         compressed_file = compress(filename=validated_urls, delete_original=True)
 
         s3 = boto3.resource('s3')
-        filename_s3 = 'validated_url_raw/{}-{}.csv.bz2'.format(
-            time.strftime('%Y-%m-%d-%H-%M-%S', time.gmtime()), link_count)
+        if creation_date is None:
+            filename_s3 = 'validated_url_raw/{}-{}.csv.bz2'.format(
+                time.strftime('%Y-%m-%d-%H-%M-%S', time.gmtime()), link_count)
+        else:
+            filename_s3 = 'validated_url_raw/{}-{}.csv.bz2'.format(
+                creation_date + '-23-59-59', link_count)
         logging.info("Upload file %s to bucket %s at %s", compressed_file, self.s3_data, filename_s3)
         s3.Bucket(self.s3_data).upload_file(str(compressed_file), filename_s3)
 
@@ -130,6 +141,8 @@ class URLValidator:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-c', '--config', help='S3 Bucket with configuration', required=True)
+    parser.add_argument('--creation_date', help='If specified, script will validate URLs for given date; '
+                                                'otherwise, it will assume yesterday')
     args = parser.parse_args()
 
     config = read_dict_from_s3_url(url=args.config)
@@ -140,7 +153,7 @@ def main():
         url_validator = URLValidator(s3_admin=config['aws']['s3-admin'],
                                      s3_data=config['aws']['s3-data'],
                                      athena_data=config['aws']['athena-data'])
-        url_validator.expand_urls()
+        url_validator.expand_urls(creation_date=args.creation_date)
 
         total, used, free = shutil.disk_usage("/")
         logging.info("Disk Usage: total: %.1f Gb - used: %.1f Gb - free: %.1f Gb",
