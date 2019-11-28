@@ -7,29 +7,43 @@ import argparse
 from pathlib import Path
 import shutil
 from datetime import date, timedelta
+import uuid
 
 
 class URLValidator:
+    __TWEET_USER_URL = """
+    select
+      twitter_stream.id_str as tweet_id,
+      twitter_stream.user.id_str as user_id,
+      url.expanded_url as url
+    from
+      internet_scholar.twitter_stream as twitter_stream,
+      unnest(entities.urls) as t(url)
+    where
+      twitter_stream.creation_date = '{creation_date}' and
+      url.display_url not like 'twitter.com/%'
+    order by
+      tweet_id,
+      user_id,
+      url;    
+    """
+
     __UNVALIDATED_URLS = """
     select
-        distinct url.expanded_url
+        distinct url
     from
-        twitter_stream,
-        unnest(entities.urls) as t(url)
+        tweet_user_url
     where
-        creation_date = '{creation_date}' and
-        url.display_url not like 'twitter.com/%'
+        creation_date = '{creation_date}'
     """
 
     __COUNT_UNVALIDATED_URLS = """
     select
-        count(distinct url.expanded_url) as link_count
+        count(distinct url) as link_count
     from
-        twitter_stream,
-        unnest(entities.urls) as t(url)
+        tweet_user_url
     where
-        creation_date = '{creation_date}' and
-        url.display_url not like 'twitter.com/%'
+        creation_date = '{creation_date}'
     """
 
     __CREATE_TABLE_VALIDATED_URL = """
@@ -64,6 +78,23 @@ class URLValidator:
     LOCATION 's3://{s3_data}/validated_url_raw/';
     """
 
+    __CREATE_TABLE_TWEET_USER_URL = """
+    CREATE EXTERNAL TABLE if not exists tweet_user_url (
+       tweet_id string,
+       user_id string,
+       url string
+    )
+    PARTITIONED BY (creation_date String)
+    ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.OpenCSVSerde'
+    WITH SERDEPROPERTIES (
+       'separatorChar' = ',',
+       'quoteChar' = '"',
+       'skip.header.line.count' = '1'
+       )
+    STORED AS TEXTFILE
+    LOCATION 's3://{s3_data}/tweet_user_url/';
+    """
+
     LOGGING_INTERVAL = 1000
 
     def __init__(self, s3_admin, s3_data, athena_data):
@@ -75,19 +106,35 @@ class URLValidator:
         logging.info("begin: expand URLs")
         athena = AthenaDatabase(database=self.athena_data, s3_output=self.s3_admin)
 
+        yesterday = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
         if creation_date is None:
-            # creation_date is yesterday
-            query = self.__UNVALIDATED_URLS.format(
-                creation_date=(date.today() - timedelta(days=1)).strftime("%Y-%m-%d"))
-            query_count = self.__COUNT_UNVALIDATED_URLS.format(
-                creation_date=(date.today() - timedelta(days=1)).strftime("%Y-%m-%d"))
-        else:
-            query = self.__UNVALIDATED_URLS.format(creation_date=creation_date)
-            query_count = self.__COUNT_UNVALIDATED_URLS.format(creation_date=creation_date)
+            creation_date = yesterday
+        logging.info("Expand URLs that were tweeted on {creation_date}".format(creation_date=creation_date))
+
+        query_tweet_user_url = self.__TWEET_USER_URL.format(creation_date=creation_date)
+        query = self.__UNVALIDATED_URLS.format(creation_date=creation_date)
+        query_count = self.__COUNT_UNVALIDATED_URLS.format(creation_date=creation_date)
         if athena.table_exists("validated_url"):
             logging.info("Table validated_url exists")
-            query = query + " and url.expanded_url not in (select url from validated_url)"
-            query_count = query_count + " and url.expanded_url not in (select url from validated_url)"
+            query = query + " and url not in (select validated_url.url from validated_url)"
+            query_count = query_count + " and url not in (select validated_url.url from validated_url)"
+
+        logging.info('Update table tweet_user_url')
+        tweet_user_url = athena.query_athena_and_download(
+            query_string=query_tweet_user_url.format(creation_date=creation_date),
+            filename=creation_date + '.csv')
+        compressed_file = compress(filename=tweet_user_url)
+        s3 = boto3.resource('s3')
+        s3_filename = "tweet_user_url/creation_date={creation_date}/{code}.csv.bz2".format(creation_date=creation_date,
+                                                                                           code=uuid.uuid4().hex)
+        logging.info('Upload data file that will comprise tweet_user_url')
+        s3.Bucket(self.s3_data).upload_file(str(compressed_file), s3_filename)
+
+        logging.info('Update table tweet_user_url on Athena')
+        logging.info("Create Athena table tweet_user_url if does not exist already")
+        athena.query_athena_and_wait(query_string=self.__CREATE_TABLE_TWEET_USER_URL.format(s3_data=self.s3_data))
+        athena.query_athena_and_wait(query_string="MSCK REPAIR TABLE tweet_user_url")
+
         link_count = int(athena.query_athena_and_get_result(query_string=query_count)['link_count'])
         logging.info("There are %d links to be processed: download them", link_count)
         unvalidated_urls = athena.query_athena_and_download(query_string=query, filename="unvalidated_urls.csv")
@@ -109,15 +156,14 @@ class URLValidator:
                     if num_links % self.LOGGING_INTERVAL == 0:
                         logging.info("%d out of %d links processed", num_links, link_count)
                     num_links = num_links + 1
-                    for expanded_url in url_expander.expand_url(url['expanded_url']):
+                    for expanded_url in url_expander.expand_url(url['url']):
                         writer.writerow(expanded_url)
                 logging.info("All links processed")
 
         logging.info("Compress file %s", validated_urls)
         compressed_file = compress(filename=validated_urls, delete_original=True)
 
-        s3 = boto3.resource('s3')
-        if creation_date is None:
+        if creation_date == yesterday:
             filename_s3 = 'validated_url_raw/{}-{}.csv.bz2'.format(
                 time.strftime('%Y-%m-%d-%H-%M-%S', time.gmtime()), link_count)
         else:
