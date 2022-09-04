@@ -66,7 +66,7 @@ class URLValidator:
        validated_url string,
        status_code int,
        content_type string,
-       content_length int,
+       content_length bigint,
        created_at timestamp
     )
     ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.OpenCSVSerde'
